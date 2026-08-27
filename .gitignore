@@ -1,0 +1,18 @@
+# Large binary files - distributed separately via deploy-bundles
+deploy-bundle/images.tar
+deploy-bundle/vol-*.tgz
+deploy-bundle-slim/images.tar
+deploy-bundle-slim/vol-*.tgz
+deploy-bundle-slim/*.rar
+
+# Temp files
+oc
+analyze-*.js
+tmp_*.sql
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Node
+node_modules/

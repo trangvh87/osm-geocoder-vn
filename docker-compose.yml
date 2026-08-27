@@ -1,0 +1,45 @@
+services:
+  nominatim:
+    image: mediagis/nominatim:4.4
+    container_name: nominatim-local
+    restart: unless-stopped
+    environment:
+      - PBF_URL=https://download.geofabrik.de/asia/vietnam-latest.osm.pbf
+      - REVERSE_ONLY=false
+    ports:
+      - "8080:8080"
+    volumes:
+      - nominatim-data:/var/lib/postgresql/14/main
+    shm_size: 2g
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    container_name: meilisearch-vn
+    restart: unless-stopped
+    ports:
+      - "7700:7700"
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_KEY:-vn-geocode-key-2026}
+      - MEILI_NO_ANALYTICS=true
+      - MEILI_ENV=production
+    volumes:
+      - meili-data:/meili_data
+
+  geoproxy:
+    build: .
+    image: osm-geoproxy:1.0
+    container_name: geoproxy
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NOMINATIM_URL=http://nominatim:8080
+      - MEILI_URL=http://meilisearch:7700
+      - MEILI_KEY=${MEILI_KEY:-vn-geocode-key-2026}
+    depends_on:
+      - nominatim
+      - meilisearch
+
+volumes:
+  nominatim-data:
+  meili-data:
