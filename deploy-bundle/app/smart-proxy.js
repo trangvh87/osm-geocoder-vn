@@ -5,7 +5,7 @@ const http = require('http');
 const app = express();
 app.use(express.json());
 
-const NOMINATIM_URL = process.env.NOMINATIM_URL || 'http://localhost:8080';
+const NOMINATIM_URL = (process.env.NOMINATIM_URL || '').trim();
 const MEILI_URL = process.env.MEILI_URL || 'http://localhost:7700';
 const MEILI_KEY = process.env.MEILI_KEY || 'vn-geocode-key-2026';
 const INDEX = 'places';
@@ -28,9 +28,9 @@ function normalizeQuery(q) {
   return cleanSearch(stripDiacritics(String(q || '').trim()));
 }
 
-function meiliSearch(q, limit = 10) {
+function meiliSearch(q, limit = 10, extra = {}) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ q, limit });
+    const body = JSON.stringify({ q, limit, ...extra });
     const req = http.request(`${MEILI_URL}/indexes/${INDEX}/search`, {
       method: 'POST',
       headers: {
@@ -67,6 +67,33 @@ function hitToNominatimFormat(hit) {
     type: hit.type,
     importance: hit.importance || 0
   };
+}
+
+// ---------- dedupe: gop cac ket qua trung dia chi (display_name) ----------
+const CLASS_PRIORITY = {
+  building: 10, place: 9, highway: 8, boundary: 7, landuse: 6,
+  leisure: 5, amenity: 5, shop: 4, tourism: 4, office: 3,
+  historic: 3, waterway: 3, natural: 3, man_made: 3,
+  railway: 3, aeroway: 3, military: 1
+};
+
+function resultScore(r) {
+  const imp = Number(r.importance) || 0;
+  const cls = CLASS_PRIORITY[r.class] || 2;
+  return imp * 1000 + cls;
+}
+
+function dedupeResults(results) {
+  const map = new Map();
+  for (const r of results) {
+    const key = String(r.display_name || '').toLowerCase().trim();
+    if (!key) { map.set(Symbol(), r); continue; }
+    const existing = map.get(key);
+    if (!existing || resultScore(r) > resultScore(existing)) {
+      map.set(key, r);
+    }
+  }
+  return Array.from(map.values());
 }
 
 // ---------- fallback: original multi-query Nominatim flow ----------
@@ -137,19 +164,28 @@ app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'Missing query parameter q' });
     const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const dedupe = req.query.dedupe !== '0';
+    const keyOf = (r) => String(r.display_name || '').toLowerCase().trim();
 
     try {
       const nq = normalizeQuery(q);
-      const out = await meiliSearch(nq, limit);
+      const out = await meiliSearch(nq, Math.min(limit * 2, 50));
       if (out.hits && out.hits.length > 0) {
-        return res.json(out.hits.map(hitToNominatimFormat));
+        let results = out.hits.map(hitToNominatimFormat);
+        if (dedupe) results = dedupeResults(results);
+        return res.json(results.slice(0, limit));
       }
     } catch (e) {
-      console.warn('Meilisearch failed, falling back to Nominatim:', e.message);
+      console.warn('Meilisearch failed:', e.message);
     }
 
-    const results = await nominatimFallback(q);
-    res.json(results);
+    if (!NOMINATIM_URL) {
+      console.warn('No results and NOMINATIM_URL not set (slim mode)');
+      return res.json([]);
+    }
+    let results = await nominatimFallback(q);
+    if (dedupe) results = dedupeResults(results);
+    res.json(results.slice(0, limit));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -157,6 +193,21 @@ app.get('/search', async (req, res) => {
 
 app.get('/reverse', async (req, res) => {
   try {
+    const { lat, lon } = req.query;
+    if (!NOMINATIM_URL) {
+      const la = Number(lat), lo = Number(lon);
+      if (!isFinite(la) || !isFinite(lo)) {
+        return res.status(400).json({ error: 'Invalid lat/lon' });
+      }
+      const out = await meiliSearch('', 1, {
+        sort: [`_geoPoint(${la},${lo}):asc`]
+      });
+      const hit = out.hits && out.hits[0];
+      if (!hit) return res.status(404).json({ error: 'Unable to geocode' });
+      const r = hitToNominatimFormat(hit);
+      r.name = hit.name || '';
+      return res.json(r);
+    }
     const response = await axios.get(`${NOMINATIM_URL}/reverse`, {
       params: { format: 'json', ...req.query },
       timeout: 8000
@@ -168,4 +219,4 @@ app.get('/reverse', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Smart geocoder proxy :${PORT} (Meilisearch -> Nominatim fallback)`));
+app.listen(PORT, () => console.log(`Smart geocoder proxy :${PORT} (Meilisearch${NOMINATIM_URL ? ' -> Nominatim fallback' : ', slim mode'})`));

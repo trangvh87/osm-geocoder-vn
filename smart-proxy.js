@@ -69,6 +69,33 @@ function hitToNominatimFormat(hit) {
   };
 }
 
+// ---------- dedupe: gop cac ket qua trung dia chi (display_name) ----------
+const CLASS_PRIORITY = {
+  building: 10, place: 9, highway: 8, boundary: 7, landuse: 6,
+  leisure: 5, amenity: 5, shop: 4, tourism: 4, office: 3,
+  historic: 3, waterway: 3, natural: 3, man_made: 3,
+  railway: 3, aeroway: 3, military: 1
+};
+
+function resultScore(r) {
+  const imp = Number(r.importance) || 0;
+  const cls = CLASS_PRIORITY[r.class] || 2;
+  return imp * 1000 + cls;
+}
+
+function dedupeResults(results) {
+  const map = new Map();
+  for (const r of results) {
+    const key = String(r.display_name || '').toLowerCase().trim();
+    if (!key) { map.set(Symbol(), r); continue; }
+    const existing = map.get(key);
+    if (!existing || resultScore(r) > resultScore(existing)) {
+      map.set(key, r);
+    }
+  }
+  return Array.from(map.values());
+}
+
 // ---------- fallback: original multi-query Nominatim flow ----------
 const VN_SYNONYMS = {
   'đ': 'duong',
@@ -137,12 +164,16 @@ app.get('/search', async (req, res) => {
     const q = req.query.q;
     if (!q) return res.status(400).json({ error: 'Missing query parameter q' });
     const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const dedupe = req.query.dedupe !== '0';
+    const keyOf = (r) => String(r.display_name || '').toLowerCase().trim();
 
     try {
       const nq = normalizeQuery(q);
-      const out = await meiliSearch(nq, limit);
+      const out = await meiliSearch(nq, Math.min(limit * 2, 50));
       if (out.hits && out.hits.length > 0) {
-        return res.json(out.hits.map(hitToNominatimFormat));
+        let results = out.hits.map(hitToNominatimFormat);
+        if (dedupe) results = dedupeResults(results);
+        return res.json(results.slice(0, limit));
       }
     } catch (e) {
       console.warn('Meilisearch failed:', e.message);
@@ -152,8 +183,9 @@ app.get('/search', async (req, res) => {
       console.warn('No results and NOMINATIM_URL not set (slim mode)');
       return res.json([]);
     }
-    const results = await nominatimFallback(q);
-    res.json(results);
+    let results = await nominatimFallback(q);
+    if (dedupe) results = dedupeResults(results);
+    res.json(results.slice(0, limit));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
